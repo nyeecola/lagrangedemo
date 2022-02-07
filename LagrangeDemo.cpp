@@ -18,10 +18,16 @@
 
 #define MAX_CELESTIAL_BODIES 50
 
+#define FOCUSED_CAMERA_DIST 25.0
+#define LINE_WIDTH 500.0
+#define MIN_ZOOM 800.0
+#define NUM_ZOOM_LEVELS 20
+
 #define POLL_GL_ERROR poll_gl_error(__FILE__, __LINE__)
 
 /* TODO:
- * - Refactor all this code.
+ * - Improve camera movement.
+ * - Add relative path drawing.
  * - Add normals to spheres.
  * - Add lighting.
  * - Add better lines. (check https://www.labri.fr/perso/nrougier/python-opengl/#rendering-lines)
@@ -50,10 +56,12 @@ struct Line {
     GLfloat vertices[2 * 3]; // triangle strip
 };
 
+struct CelestialBody;
+
 struct LinePath {
 #define MAX_LINE_PATH_SEGMENTS 1000
     Line* lines; // circular buffer
-    float width;
+    CelestialBody *owner;
     int path_start;
     int num_segments;
 };
@@ -78,6 +86,10 @@ struct GlobalState {
     RenderingMode rendering_mode;
     CelestialBody* celestial_bodies[MAX_CELESTIAL_BODIES];
     int num_celestial_bodies;
+    int camera_target;
+    glm::vec3 camera_pos;
+    float focused_camera_distance;
+    int zoom_level;
 };
 
 void poll_gl_error(const char* file, long long line) {
@@ -102,12 +114,55 @@ static void key_callback(GLFWwindow* window, int key, int scancode, int action, 
     // switch rendering mode
     if ((key == GLFW_KEY_LEFT_CONTROL || key == GLFW_KEY_RIGHT_CONTROL) && action == GLFW_PRESS) {
         global_state->rendering_mode = global_state->rendering_mode == RENDER_MINIFIED ? RENDER_TO_SCALE : RENDER_MINIFIED;
+        // reset paths
+        for (int i = 0; i < global_state->num_celestial_bodies; i++) {
+            global_state->celestial_bodies[i]->path_taken->num_segments = 0;
+            global_state->celestial_bodies[i]->path_taken->path_start = 0;
+        }
+        // reset camera
+        global_state->camera_target = -1;
+    }
+
+    // switch camera target
+    if (key == GLFW_KEY_SPACE && action == GLFW_PRESS && global_state->rendering_mode == RENDER_TO_SCALE) {
+        global_state->camera_target = (global_state->camera_target + 1) % (global_state->num_celestial_bodies + 1);
+        if (global_state->camera_target == global_state->num_celestial_bodies) {
+            global_state->camera_target = -1; // default camera
+        }
+        // reset paths
         for (int i = 0; i < global_state->num_celestial_bodies; i++) {
             global_state->celestial_bodies[i]->path_taken->num_segments = 0;
             global_state->celestial_bodies[i]->path_taken->path_start = 0;
         }
     }
 }
+
+void scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
+{
+    GlobalState* global_state = (GlobalState*)glfwGetWindowUserPointer(window);
+
+    if (global_state->camera_target == -1 || global_state->rendering_mode == RENDER_MINIFIED)
+        return;
+
+    CelestialBody* target = global_state->celestial_bodies[global_state->camera_target];
+    float max_zoom = std::log2(target->size * 3.5f);
+    float min_zoom = std::log2(MIN_ZOOM);
+
+    if (yoffset > 0.0 && global_state->zoom_level < NUM_ZOOM_LEVELS)
+        global_state->zoom_level++;
+    else if (yoffset < 0.0 && global_state->zoom_level > 0)
+        global_state->zoom_level--;
+
+    // TODO: this is a hack, we should have a better path rendering implementation
+    // reset paths
+    for (int i = 0; i < global_state->num_celestial_bodies; i++) {
+        global_state->celestial_bodies[i]->path_taken->num_segments = 0;
+        global_state->celestial_bodies[i]->path_taken->path_start = 0;
+    }
+    
+    global_state->focused_camera_distance = std::exp2(min_zoom + (max_zoom-min_zoom)*global_state->zoom_level / NUM_ZOOM_LEVELS);
+}
+
 
 // TODO: caller must free buffer
 char* load_file(char const* path) {
@@ -135,13 +190,13 @@ char* load_file(char const* path) {
     return buffer;
 }
 
-LinePath *create_line_path(float width) {
+LinePath *create_line_path(CelestialBody *c) {
     LinePath *line_path = (LinePath *) calloc(1, sizeof(LinePath));
     if (line_path == NULL)
         exit(-1);
     // TODO: check what's up with this warning
     line_path->lines = (Line *) calloc(MAX_LINE_PATH_SEGMENTS, sizeof(Line));
-    line_path->width = width;
+    line_path->owner = c;
     return line_path;
 }
 
@@ -157,7 +212,7 @@ void destroy_line_path(LinePath **line_path) {
 
 // TODO: optimize this
 // TODO: think how to make it cilindrical in 3d
-void append_to_line_path(LinePath *line_path, glm::vec3 pos, glm::vec3 o0, glm::vec3 o1) {
+void append_to_line_path(LinePath *line_path, GlobalState global_state, glm::vec3 pos, glm::vec3 o0, glm::vec3 o1, float width) {
     int index = (line_path->path_start + line_path->num_segments) % MAX_LINE_PATH_SEGMENTS;
 
     glm::vec3 orig = ((o0 - o1) * 1.0f / 2.0f) + o1;
@@ -165,19 +220,12 @@ void append_to_line_path(LinePath *line_path, glm::vec3 pos, glm::vec3 o0, glm::
 
     glm::vec3 perp = glm::cross(glm::normalize(dir), glm::vec3(0.0, 1.0, 0.0));
 
-    fprintf(stderr, "dot(dir, per) == %f\n", glm::dot<3, float, glm::qualifier::highp>(dir, perp));
-
-    glm::vec3 p0 = pos + perp * (1.0f / 2.0f) * line_path->width;
-    glm::vec3 p1 = pos - perp * (1.0f / 2.0f) * line_path->width;
-
-    fprintf(stderr, "(1.0f / 2.0f) * line_path->width == %f\n", (1.0f / 2.0f) * line_path->width);
+    glm::vec3 p0 = pos + perp * (1.0f / 2.0f) * width;
+    glm::vec3 p1 = pos - perp * (1.0f / 2.0f) * width;
 
     Line new_line = { p0.x, p0.y, p0.z, p1.x, p1.y, p1.z };
 
     line_path->lines[index] = new_line;
-
-    fprintf(stderr, "appended new line: %f %f %f   %f %f %f\n", p0.x, p0.y, p0.z, p1.x, p1.y, p1.z);
-    fprintf(stderr, "appended new line: num_segments == %d\n", line_path->num_segments);
 
     line_path->num_segments++;
     if (line_path->num_segments > MAX_LINE_PATH_SEGMENTS) {
@@ -186,20 +234,23 @@ void append_to_line_path(LinePath *line_path, glm::vec3 pos, glm::vec3 o0, glm::
     }
 }
 
-void update_line_path(LinePath* line_path, glm::vec3 pos) {
+void update_line_path(LinePath* line_path, GlobalState global_state, glm::vec3 pos) {
     int index = (line_path->path_start + line_path->num_segments) % MAX_LINE_PATH_SEGMENTS;
     int index_bef = index == 0 ? MAX_LINE_PATH_SEGMENTS - 1 : index - 1;
 
+    glm::vec3 camera_target_pos = global_state.camera_target == -1 ? glm::vec3(0) : glm::vec3(global_state.celestial_bodies[global_state.camera_target]->position);
+
+    float width = glm::length(global_state.camera_pos - camera_target_pos) / LINE_WIDTH;
     if (line_path->num_segments == 0) {
-        Line l = { -line_path->width / 2.0f, 0, 0 , line_path->width / 2.0f, 0, 0 };
+        Line l = { -width / 2.0f, 0, 0 , width / 2.0f, 0, 0 };
         line_path->lines[index_bef] = l;
     }
 
     glm::vec3 o0 = glm::vec3(line_path->lines[index_bef].vertices[0], line_path->lines[index_bef].vertices[1], line_path->lines[index_bef].vertices[2]);
     glm::vec3 o1 = glm::vec3(line_path->lines[index_bef].vertices[3], line_path->lines[index_bef].vertices[4], line_path->lines[index_bef].vertices[5]);
     
-    if (glm::abs(glm::length(pos - o0)) > 5.0f)
-        append_to_line_path(line_path, pos, o0, o1);
+    if (glm::abs(glm::length(pos - o0)) > width * 2)
+        append_to_line_path(line_path, global_state, pos, o0, o1, width);
     //else // TODO
       //  line_path->lines[index]
 }
@@ -250,7 +301,7 @@ CelestialBody *create_celestial_body(glm::dvec3 position, glm::dvec3 velocity, f
     c->mass = mass;
     c->size = size;
     c->color = color;
-    c->path_taken = create_line_path(2.5);
+    c->path_taken = create_line_path(c);
     c->minified_dist_scale = minified_dist_scale;
     c->minified_size_scale = minified_size_scale;
     c->anchor = anchor;
@@ -269,12 +320,12 @@ void destroy_celestial_body(CelestialBody **c) {
     }
 }
 
-void render_celestial_body(GLuint VAO, GLuint pathVAO, GLuint pathVBO, GLuint program, Sphere s, CelestialBody *c, RenderingMode mode) {
+void render_celestial_body(GlobalState global_state, GLuint VAO, GLuint pathVAO, GLuint pathVBO, GLuint program, Sphere s, CelestialBody *c) {
     double scale_dist = 1.0, scale_size = 1.0, anchor_scale_dist = 1.0;
     CelestialBody* anchor = NULL;
 
     // adjust scale given a rendering mode
-    switch (mode) {
+    switch (global_state.rendering_mode) {
     case RENDER_MINIFIED:
         scale_size = c->minified_size_scale;
         scale_dist = c->minified_dist_scale;
@@ -313,17 +364,26 @@ void render_celestial_body(GLuint VAO, GLuint pathVAO, GLuint pathVBO, GLuint pr
     } else {
         rendered_position = c->position * scale_dist;
     }
-    update_line_path(c->path_taken, rendered_position);
+    update_line_path(c->path_taken, global_state, rendered_position);
 
     // render path taken
     glBindVertexArray(pathVAO);
         glBindBuffer(GL_ARRAY_BUFFER, pathVBO);
         model_mat = glm::mat4(1.0f);
-        // When drawing paths, we don't use translate, we use the absolute values of the points, so we need to scale it to compensate for the
-        // reduced scale.
         glUniform3fv(glGetUniformLocation(program, "forced_color"), 1, glm::value_ptr(c->color));
         glUniformMatrix4fv(glGetUniformLocation(program, "model"), 1, GL_FALSE, glm::value_ptr(model_mat));
-        glBufferData(GL_ARRAY_BUFFER, c->path_taken->num_segments * 6 * sizeof(GLfloat), c->path_taken->lines, GL_DYNAMIC_DRAW);
+        
+        // FIXME: temporary hack to transfor the circular buffer into a linear buffer
+        // TODO: stop allocating this stuff thousands of times!!!
+        Line *linearized = (Line*) calloc(c->path_taken->num_segments, sizeof(Line));
+        if (linearized == NULL) exit(-1);
+        memcpy(linearized, c->path_taken->lines + c->path_taken->path_start, (c->path_taken->num_segments - c->path_taken->path_start) * 6 * sizeof(GLfloat));
+        memcpy(linearized + (c->path_taken->num_segments - c->path_taken->path_start), c->path_taken->lines, c->path_taken->path_start * 6 * sizeof(GLfloat));
+
+        glBufferData(GL_ARRAY_BUFFER, c->path_taken->num_segments * 6 * sizeof(GLfloat), /*c->path_taken->lines*/ linearized, GL_DYNAMIC_DRAW);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), (void*)0);
+
+        free(linearized);
 
         glDrawArrays(GL_TRIANGLE_STRIP, 0, c->path_taken->num_segments * 2);
     glBindVertexArray(0);
@@ -352,6 +412,7 @@ int main()
     }
 
     glfwSetKeyCallback(window, key_callback);
+    glfwSetScrollCallback(window, scroll_callback);
     glfwMakeContextCurrent(window);
 
     glewExperimental = 1;
@@ -409,10 +470,6 @@ int main()
     // intialize misc stuff
     Sphere sphere = create_sphere(12);
 
-    // initialize camera data
-    glm::vec3 camera_pos(0, 1000, 0);
-    glm::vec3 camera_up(0, 0, -1); /* TODO: positive or negative? */
-
     float frame_time = (float) glfwGetTime();
     float last_time = (float) glfwGetTime();
     float last_fps_update = (float) glfwGetTime();
@@ -428,7 +485,7 @@ int main()
      * sun once.
      */
     double gravitational_constant = 6 * glm::pow(10, 0); // TODO: tune this
-    CelestialBody *sun = create_celestial_body(glm::dvec3(0.0), glm::dvec3(0.0), 333000.0, 0.0164 * 100, glm::vec3(1.0f, 1.0f, 0.0f), 40.0, 1.0, NULL);
+    CelestialBody *sun = create_celestial_body(glm::dvec3(0.0), glm::dvec3(0.0), 333000.0, 0.0164 * 100, glm::vec3(0.97f, 0.45f, 0.1f), 40.0, 1.0, NULL);
     CelestialBody *earth = create_celestial_body(glm::dvec3(382.0, 0.0, 0.0), glm::dvec3(0.0, 0.0, 1.0), 1.0, 0.0164, glm::vec3(0.02f, 0.05f, 1.0f), 1219.0, 0.5, sun);
     CelestialBody *moon = create_celestial_body(glm::dvec3(383.0, 0.0, 0.0), glm::dvec3(0.0, 0.0, 1.0), 0.0123, 0.0164 / 3.5, glm::vec3(0.8f, 0.8f, 0.8f), 1219.0, 30.0, earth);
     double orbital_velocity_mag = std::sqrt((gravitational_constant * sun->mass) / (glm::length(sun->position - earth->position)));
@@ -444,6 +501,9 @@ int main()
     global_state.celestial_bodies[global_state.num_celestial_bodies++] = sun;
     global_state.celestial_bodies[global_state.num_celestial_bodies++] = earth;
     global_state.celestial_bodies[global_state.num_celestial_bodies++] = moon;
+    global_state.camera_target = -1;
+    global_state.focused_camera_distance = FOCUSED_CAMERA_DIST;
+    global_state.zoom_level = 10;
     glfwSetWindowUserPointer(window, (void*) &global_state);
 
     // initialize GL buffers
@@ -491,30 +551,6 @@ int main()
         ratio = width / (float)height;
         glm::mat4 proj_mat = glm::perspective<float>(glm::quarter_pi<float>(), ratio, 0.01f, 2000.0f);
 
-        /* input handling */
-        glm::vec3 dir(0);
-        if (glfwGetKey(window, GLFW_KEY_W)) {
-            dir.z = -1;
-        }
-        if (glfwGetKey(window, GLFW_KEY_A)) {
-            dir.x = -1;
-        }
-        if (glfwGetKey(window, GLFW_KEY_S)) {
-            dir.z = 1;
-        }
-        if (glfwGetKey(window, GLFW_KEY_D)) {
-            dir.x = 1;
-        }
-        glm::normalize(dir);
-        camera_pos += dir;
-
-        // camera view direction
-        glm::vec3 camera_target(0);
-        glm::mat4 view_mat = glm::lookAt(camera_pos, camera_target, camera_up);
-
-        // make view-projection matrix
-        glm::mat4 view_proj_mat = proj_mat * view_mat;
-
         // set up gl context vars to start drawing
         glEnable(GL_DEPTH_TEST);
         glDisable(GL_CULL_FACE);
@@ -523,9 +559,6 @@ int main()
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         glUseProgram(program);
-
-        //glUniform3fv(glGetUniformLocation(program, "cameraPos"), 1, glm::value_ptr(camera_pos));
-        glUniformMatrix4fv(glGetUniformLocation(program, "view_proj"), 1, GL_FALSE, glm::value_ptr(view_proj_mat));
 
         // physics
         while (frame_time > 0) {
@@ -558,8 +591,43 @@ int main()
             frame_time -= delta_time;
         }
 
+        // camera stuff
+        glm::mat4 view_mat;
+        if (global_state.camera_target == -1) {
+            glm::vec3 camera_target(0);
+            global_state.camera_pos = glm::vec3(0, 1000, 0);
+            glm::vec3 camera_up(0, 0, -1);
+            view_mat = glm::lookAt(global_state.camera_pos, camera_target, camera_up);
+        }
+        else {
+            CelestialBody* target = global_state.celestial_bodies[global_state.camera_target];
+            glm::vec3 camera_target(0);
+            switch (global_state.rendering_mode) {
+            case RENDER_TO_SCALE:
+                camera_target = target->position;
+                break;
+            case RENDER_MINIFIED:
+                camera_target = target->anchor ? glm::vec3(target->anchor->position * target->anchor->minified_dist_scale) : glm::vec3(0);
+                camera_target += (target->position - (target->anchor ? target->anchor->position : glm::dvec3(0))) * target->minified_dist_scale;
+                break;
+            default:
+                fprintf(stderr, "Error: Invalid rendering mode.\n");
+                exit(-1);
+            }
+            glm::vec3 camera_up(0, 1, 0);
+            global_state.camera_pos = ((glm::vec3(target->position) + glm::normalize(glm::vec3(target->velocity)) * (target->size + global_state.focused_camera_distance)) - glm::vec3(target->position));
+            global_state.camera_pos += glm::vec3(target->position);
+            global_state.camera_pos += glm::vec3(0, global_state.focused_camera_distance / 2, 0); // offset from the plane a little bit // TODO: parameterize this?
+            //fprintf(stderr, "camera position: %f %f %f\n", camera_pos.x, camera_pos.y, camera_pos.z);
+            view_mat = glm::lookAt(global_state.camera_pos, camera_target, camera_up);
+        }
+        // make view-projection matrix
+        glm::mat4 view_proj_mat = proj_mat * view_mat;
+        glUniformMatrix4fv(glGetUniformLocation(program, "view_proj"), 1, GL_FALSE, glm::value_ptr(view_proj_mat));
+
+        // rendering
         for (int i = 0; i < global_state.num_celestial_bodies; i++) {
-            render_celestial_body(VAO, pathVAO, pathVBO, program, sphere, global_state.celestial_bodies[i], global_state.rendering_mode);
+            render_celestial_body(global_state, VAO, pathVAO, pathVBO, program, sphere, global_state.celestial_bodies[i]);
         }
 
         // finished rendering the frame
