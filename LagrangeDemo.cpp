@@ -26,7 +26,6 @@
 #define POLL_GL_ERROR poll_gl_error(__FILE__, __LINE__)
 
 /* TODO:
- * - Add fully-fixed physics timestep and check if it makes L2 more stable.
  * - Improve camera movement.
  * - Add relative path drawing.
  * - Add normals to spheres.
@@ -503,8 +502,6 @@ int main()
     lagrange2->velocity *= orbital_velocity_mag;
     lagrange4->velocity = glm::cross(glm::normalize(sun->position - lagrange4->position), glm::dvec3(0.0, 1.0, 0.0)) * -glm::length(earth->velocity);
 
-    fprintf(stderr, "moon v %f  |  l2 v %f\n", glm::length(moon->velocity), glm::length(lagrange2->velocity));
-
     // Initialize global simulation state
     GlobalState global_state = { };
     global_state.rendering_mode = RENDER_MINIFIED;
@@ -541,10 +538,13 @@ int main()
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), (void*)0);
     glBindVertexArray(0);
 
+    double physics_accumulator = 0.0;
     POLL_GL_ERROR;
     while (!glfwWindowShouldClose(window)) {
         frame_time = glfwGetTime() - last_time;
+        if (frame_time > 0.3) frame_time = 0.3; // we "pause" the simulation if rendering takes too long
         last_time += frame_time;
+        physics_accumulator += frame_time;
 
         // Measure FPS
         double currentTime = glfwGetTime();
@@ -572,9 +572,10 @@ int main()
 
         glUseProgram(program);
 
+        // TODO: interpolate between next physics frame and the accumulator remainder before rendering
         // physics
-        while (frame_time > 0) {
-            double delta_time = std::fmin(frame_time, physics_step);
+        while (physics_accumulator >= physics_step) {
+            double delta_time = physics_step;
 
             // naive n-body simulation using particle-based Newton's laws of motion
             // we calculate all the velocities before update the position because it's more stable that way
@@ -600,7 +601,7 @@ int main()
                 c_i->position += c_i->velocity * delta_time;
             }
 
-            frame_time -= delta_time;
+            physics_accumulator -= delta_time;
         }
 
         // camera stuff
