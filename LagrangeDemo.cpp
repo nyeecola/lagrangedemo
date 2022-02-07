@@ -26,6 +26,7 @@
 #define POLL_GL_ERROR poll_gl_error(__FILE__, __LINE__)
 
 /* TODO:
+ * - Add fully-fixed physics timestep and check if it makes L2 more stable.
  * - Improve camera movement.
  * - Add relative path drawing.
  * - Add normals to spheres.
@@ -37,7 +38,7 @@
  * - Add parameters (mass, initial velocity, distance to other bodies) to GUI.
  * - Add ability to pause/resume simulation.
  * - Add orbit prediction.
- * - Make a lagrange point halo orbit demonstration, if possible.
+ * - Make a lagrange point halo orbit demonstration, with stationkeeping maneuvers.
  */
 
 enum RenderingMode {
@@ -474,7 +475,7 @@ int main()
     float last_time = (float) glfwGetTime();
     float last_fps_update = (float) glfwGetTime();
     int num_frames = 0;
-    float physics_step = 1 / 240.0f;
+    float physics_step = 1 / 300.0f;
 
 
     // initialize celestial bodies
@@ -487,13 +488,22 @@ int main()
     double gravitational_constant = 6 * glm::pow(10, 0); // TODO: tune this
     CelestialBody *sun = create_celestial_body(glm::dvec3(0.0), glm::dvec3(0.0), 333000.0, 0.0164 * 100, glm::vec3(0.97f, 0.45f, 0.1f), 40.0, 1.0, NULL);
     CelestialBody *earth = create_celestial_body(glm::dvec3(382.0, 0.0, 0.0), glm::dvec3(0.0, 0.0, 1.0), 1.0, 0.0164, glm::vec3(0.02f, 0.05f, 1.0f), 1219.0, 0.5, sun);
-    CelestialBody *moon = create_celestial_body(glm::dvec3(383.0, 0.0, 0.0), glm::dvec3(0.0, 0.0, 1.0), 0.0123, 0.0164 / 3.5, glm::vec3(0.8f, 0.8f, 0.8f), 1219.0, 30.0, earth);
+    CelestialBody* moon = create_celestial_body(glm::dvec3(383.0, 0.0, 0.0), glm::dvec3(0.0, 0.0, 1.0), 0.0123, 0.0164 / 3.5, glm::vec3(0.8f, 0.8f, 0.8f), 1219.0, 30.0, earth);
+    // we found the lagrange2 distance by trial and error, at 3.6952758789 it goes away from the sun and at 3.69527282714 it goes towards the sun
+    CelestialBody* lagrange2 = create_celestial_body(glm::dvec3(382.0 + 3.69527525007, 0.0, 0.0), glm::dvec3(0.0, 0.0, 1.0), 0.00001, 0.0164 / 3.5, glm::vec3(0.8f, 0.8f, 0.8f), 1219.0, 30.0, earth);
+    CelestialBody* lagrange4 = create_celestial_body(glm::rotate(glm::vec3(earth->position), glm::radians(60.0f), glm::vec3(0.0, 1.0, 0.0)), glm::dvec3(0.0, 0.0, 1.0), 0.00001, 0.0164 / 3.5, glm::vec3(0.8f, 0.3f, 0.1f), 1219.0, 0.5, sun);
     double orbital_velocity_mag = std::sqrt((gravitational_constant * sun->mass) / (glm::length(sun->position - earth->position)));
     earth->velocity *= orbital_velocity_mag;
     // Why does this work? Sounds like a such a coincidence.
     orbital_velocity_mag = std::sqrt((gravitational_constant * earth->mass) / (glm::length(earth->position - moon->position)));
     orbital_velocity_mag += std::sqrt((gravitational_constant * sun->mass) / (glm::length(sun->position - moon->position)));
     moon->velocity *= orbital_velocity_mag;
+    orbital_velocity_mag = std::sqrt((gravitational_constant * earth->mass) / (glm::length(earth->position - lagrange2->position)));
+    orbital_velocity_mag += std::sqrt((gravitational_constant * sun->mass) / (glm::length(sun->position - lagrange2->position)));
+    lagrange2->velocity *= orbital_velocity_mag;
+    lagrange4->velocity = glm::cross(glm::normalize(sun->position - lagrange4->position), glm::dvec3(0.0, 1.0, 0.0)) * -glm::length(earth->velocity);
+
+    fprintf(stderr, "moon v %f  |  l2 v %f\n", glm::length(moon->velocity), glm::length(lagrange2->velocity));
 
     // Initialize global simulation state
     GlobalState global_state = { };
@@ -501,6 +511,8 @@ int main()
     global_state.celestial_bodies[global_state.num_celestial_bodies++] = sun;
     global_state.celestial_bodies[global_state.num_celestial_bodies++] = earth;
     global_state.celestial_bodies[global_state.num_celestial_bodies++] = moon;
+    global_state.celestial_bodies[global_state.num_celestial_bodies++] = lagrange2;
+    global_state.celestial_bodies[global_state.num_celestial_bodies++] = lagrange4;
     global_state.camera_target = -1;
     global_state.focused_camera_distance = FOCUSED_CAMERA_DIST;
     global_state.zoom_level = 10;
