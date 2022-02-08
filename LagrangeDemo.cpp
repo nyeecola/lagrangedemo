@@ -26,10 +26,10 @@
 #define POLL_GL_ERROR poll_gl_error(__FILE__, __LINE__)
 
 /* TODO:
- * - Improve camera movement.
+ * - Improve camera movement. (i.e. add zoom to default camera, add mouse movement)
+ * - Add saturn's ring.
+ * - Add Uranus and Neptune.
  * - Add relative path drawing.
- * - Add normals to spheres.
- * - Add lighting.
  * - Add better lines. (check https://www.labri.fr/perso/nrougier/python-opengl/#rendering-lines)
  * - Add bloom.
  * - Add stars in the background (maybe skybox?)
@@ -49,6 +49,7 @@ enum RenderingMode {
 struct Sphere {
 #define MAX_SPHERE_ELEMENTS 3000
     GLfloat data[MAX_SPHERE_ELEMENTS];
+    GLfloat normals[MAX_SPHERE_ELEMENTS];
     int num_elements;
 };
 
@@ -90,6 +91,8 @@ struct GlobalState {
     glm::vec3 camera_pos;
     float focused_camera_distance;
     int zoom_level;
+    bool light_emitter;
+    bool enable_orbit_rendering;
 };
 
 void poll_gl_error(const char* file, long long line) {
@@ -121,6 +124,11 @@ static void key_callback(GLFWwindow* window, int key, int scancode, int action, 
         }
         // reset camera
         global_state->camera_target = -1;
+    }
+
+    // enable orbit rendering
+    if (key == GLFW_KEY_O && action == GLFW_PRESS) {
+        global_state->enable_orbit_rendering = !global_state->enable_orbit_rendering;
     }
 
     // switch camera target
@@ -212,7 +220,7 @@ void destroy_line_path(LinePath **line_path) {
 
 // TODO: optimize this
 // TODO: think how to make it cilindrical in 3d
-void append_to_line_path(LinePath *line_path, GlobalState global_state, glm::vec3 pos, glm::vec3 o0, glm::vec3 o1, float width) {
+void append_to_line_path(LinePath *line_path, GlobalState *global_state, glm::vec3 pos, glm::vec3 o0, glm::vec3 o1, float width) {
     int index = (line_path->path_start + line_path->num_segments) % MAX_LINE_PATH_SEGMENTS;
 
     glm::vec3 orig = ((o0 - o1) * 1.0f / 2.0f) + o1;
@@ -234,13 +242,13 @@ void append_to_line_path(LinePath *line_path, GlobalState global_state, glm::vec
     }
 }
 
-void update_line_path(LinePath* line_path, GlobalState global_state, glm::vec3 pos) {
+void update_line_path(LinePath* line_path, GlobalState *global_state, glm::vec3 pos) {
     int index = (line_path->path_start + line_path->num_segments) % MAX_LINE_PATH_SEGMENTS;
     int index_bef = index == 0 ? MAX_LINE_PATH_SEGMENTS - 1 : index - 1;
 
-    glm::vec3 camera_target_pos = global_state.camera_target == -1 ? glm::vec3(0) : glm::vec3(global_state.celestial_bodies[global_state.camera_target]->position);
+    glm::vec3 camera_target_pos = global_state->camera_target == -1 ? glm::vec3(0) : glm::vec3(global_state->celestial_bodies[global_state->camera_target]->position);
 
-    float width = glm::length(global_state.camera_pos - camera_target_pos) / LINE_WIDTH;
+    float width = glm::length(global_state->camera_pos - camera_target_pos) / LINE_WIDTH;
     if (line_path->num_segments == 0) {
         Line l = { -width / 2.0f, 0, 0 , width / 2.0f, 0, 0 };
         line_path->lines[index_bef] = l;
@@ -256,34 +264,45 @@ void update_line_path(LinePath* line_path, GlobalState global_state, glm::vec3 p
 }
 
 // Adapted from https://stackoverflow.com/questions/7687148/drawing-sphere-in-opengl-without-using-glusphere
-Sphere create_sphere(int gradation) {
+Sphere *create_sphere(int gradation) {
     GLfloat x, y, z, alpha, beta;  
     GLfloat radius = 1.0f;
 
     constexpr float PI = glm::pi<float>();
 
-    Sphere sphere;
-    sphere.num_elements = 6 * (gradation + 1) * (2 * gradation + 1);
-    assert(sphere.num_elements <= MAX_SPHERE_ELEMENTS);
+    Sphere* sphere = (Sphere *) calloc(1, sizeof(Sphere));
+    if (sphere == NULL) {
+        fprintf(stderr, "Error: failed to allocate memory for a sphere.\n");
+        exit(-1);
+    }
+    sphere->num_elements = 6 * (gradation + 1) * (2 * gradation + 1);
+    assert(sphere->num_elements <= MAX_SPHERE_ELEMENTS);
 
     int i = 0;
     for (alpha = 0.0; alpha < 1.01 * PI; alpha += PI / gradation)
     {
         for (beta = 0.0; beta < 2.01 * PI; beta += PI / gradation)
         {
-            sphere.data[i+0] = radius * cos(beta) * sin(alpha);
-            sphere.data[i+1] = radius * sin(beta) * sin(alpha);
-            sphere.data[i+2] = radius * cos(alpha);
+            sphere->data[i+0] = radius * cos(beta) * sin(alpha);
+            sphere->data[i+1] = radius * sin(beta) * sin(alpha);
+            sphere->data[i+2] = radius * cos(alpha);
          
-            sphere.data[i+3] = radius * cos(beta) * sin(alpha + PI / gradation);
-            sphere.data[i+4] = radius * sin(beta) * sin(alpha + PI / gradation);
-            sphere.data[i+5] = radius * cos(alpha + PI / gradation);
+            sphere->data[i+3] = radius * cos(beta) * sin(alpha + PI / gradation);
+            sphere->data[i+4] = radius * sin(beta) * sin(alpha + PI / gradation);
+            sphere->data[i+5] = radius * cos(alpha + PI / gradation);
+
+            for (int n = 0; n < 2; n++) {
+                glm::vec3 normalized = glm::normalize(glm::vec3(sphere->data[i + (n * 3) + 0], sphere->data[i + (n * 3) + 1], sphere->data[i + (n * 3) + 2]));
+                sphere->normals[i + (n * 3) + 0] = normalized.x;
+                sphere->normals[i + (n * 3) + 1] = normalized.y;
+                sphere->normals[i + (n * 3) + 2] = normalized.z;
+            }
 
             i += 6;
         }
     }
 
-    assert(i == sphere.num_elements);
+    assert(i == sphere->num_elements);
 
     return sphere;
 }
@@ -320,12 +339,12 @@ void destroy_celestial_body(CelestialBody **c) {
     }
 }
 
-void render_celestial_body(GlobalState global_state, GLuint VAO, GLuint pathVAO, GLuint pathVBO, GLuint program, Sphere s, CelestialBody *c) {
+void render_celestial_body(GlobalState *global_state, GLuint VAO, GLuint pathVAO, GLuint pathVBO, GLuint program, Sphere *s, CelestialBody *c) {
     double scale_dist = 1.0, scale_size = 1.0, anchor_scale_dist = 1.0;
     CelestialBody* anchor = NULL;
 
     // adjust scale given a rendering mode
-    switch (global_state.rendering_mode) {
+    switch (global_state->rendering_mode) {
     case RENDER_MINIFIED:
         scale_size = c->minified_size_scale;
         scale_dist = c->minified_dist_scale;
@@ -352,7 +371,13 @@ void render_celestial_body(GlobalState global_state, GLuint VAO, GLuint pathVAO,
         glUniform3fv(glGetUniformLocation(program, "forced_color"), 1, glm::value_ptr(c->color));
         glUniformMatrix4fv(glGetUniformLocation(program, "model"), 1, GL_FALSE, glm::value_ptr(model_mat));
 
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, s.num_elements / 3);
+        // FIXME: we are hardcoding the only light source as the sun
+        // TODO: add a better lighting system with support for multiple lights
+        glUniform3fv(glGetUniformLocation(program, "lightPos"), 1, glm::value_ptr(glm::vec3(global_state->celestial_bodies[0]->position)));
+        glUniform3fv(glGetUniformLocation(program, "lightColor"), 1, glm::value_ptr(glm::vec3(global_state->celestial_bodies[0]->color)));
+        glUniform1i(glGetUniformLocation(program, "light_emitter"), c == global_state->celestial_bodies[0]);
+
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, s->num_elements / 3);
     glBindVertexArray(0);
 
     // TODO: Technically this shouldn't be here, since it's not rendering anything and this code should run even when the screen loses focus
@@ -367,26 +392,28 @@ void render_celestial_body(GlobalState global_state, GLuint VAO, GLuint pathVAO,
     update_line_path(c->path_taken, global_state, rendered_position);
 
     // render path taken
-    glBindVertexArray(pathVAO);
-        glBindBuffer(GL_ARRAY_BUFFER, pathVBO);
-        model_mat = glm::mat4(1.0f);
-        glUniform3fv(glGetUniformLocation(program, "forced_color"), 1, glm::value_ptr(c->color));
-        glUniformMatrix4fv(glGetUniformLocation(program, "model"), 1, GL_FALSE, glm::value_ptr(model_mat));
-        
-        // FIXME: temporary hack to transfor the circular buffer into a linear buffer
-        // TODO: stop allocating this stuff thousands of times!!!
-        Line *linearized = (Line*) calloc(c->path_taken->num_segments, sizeof(Line));
-        if (linearized == NULL) exit(-1);
-        memcpy(linearized, c->path_taken->lines + c->path_taken->path_start, (c->path_taken->num_segments - c->path_taken->path_start) * 6 * sizeof(GLfloat));
-        memcpy(linearized + (c->path_taken->num_segments - c->path_taken->path_start), c->path_taken->lines, c->path_taken->path_start * 6 * sizeof(GLfloat));
+    if (global_state->enable_orbit_rendering) {
+        glBindVertexArray(pathVAO);
+            glBindBuffer(GL_ARRAY_BUFFER, pathVBO);
+            model_mat = glm::mat4(1.0f);
+            glUniform3fv(glGetUniformLocation(program, "forced_color"), 1, glm::value_ptr(c->color));
+            glUniformMatrix4fv(glGetUniformLocation(program, "model"), 1, GL_FALSE, glm::value_ptr(model_mat));
 
-        glBufferData(GL_ARRAY_BUFFER, c->path_taken->num_segments * 6 * sizeof(GLfloat), /*c->path_taken->lines*/ linearized, GL_DYNAMIC_DRAW);
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), (void*)0);
+            // FIXME: temporary hack to transfor the circular buffer into a linear buffer
+            // TODO: stop allocating this stuff thousands of times!!!
+            Line* linearized = (Line*)calloc(c->path_taken->num_segments, sizeof(Line));
+            if (linearized == NULL) exit(-1);
+            memcpy(linearized, c->path_taken->lines + c->path_taken->path_start, (c->path_taken->num_segments - c->path_taken->path_start) * 6 * sizeof(GLfloat));
+            memcpy(linearized + (c->path_taken->num_segments - c->path_taken->path_start), c->path_taken->lines, c->path_taken->path_start * 6 * sizeof(GLfloat));
 
-        free(linearized);
+            glBufferData(GL_ARRAY_BUFFER, c->path_taken->num_segments * 6 * sizeof(GLfloat), /*c->path_taken->lines*/ linearized, GL_DYNAMIC_DRAW);
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), (void*)0);
 
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, c->path_taken->num_segments * 2);
-    glBindVertexArray(0);
+            free(linearized);
+
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, c->path_taken->num_segments * 2);
+        glBindVertexArray(0);
+    }
 }
 
 int main()
@@ -468,7 +495,7 @@ int main()
     }
 
     // intialize misc stuff
-    Sphere sphere = create_sphere(12);
+    Sphere *sphere = create_sphere(12);
 
     float frame_time = (float) glfwGetTime();
     float last_time = (float) glfwGetTime();
@@ -484,19 +511,42 @@ int main()
      * since we don't want to wait a whole year for the earth to go around the
      * sun once.
      */
+#define SUN_SIZE_SCALE 25.0
+#define ROCKY_SIZE_SCALE 700.0
+#define GASSY_SIZE_SCALE 125.0
+#define SUN_DIST_SCALE 1.0
+#define ROCKY_DIST_SCALE 0.35
+#define MOON_DIST_SCALE 20.0
+#define GASSY_DIST_SCALE 0.155
     double gravitational_constant = 6 * glm::pow(10, 0); // TODO: tune this
-    CelestialBody *sun = create_celestial_body(glm::dvec3(0.0), glm::dvec3(0.0), 333000.0, 0.0164 * 100, glm::vec3(0.97f, 0.45f, 0.1f), 40.0, 1.0, NULL);
-    CelestialBody *earth = create_celestial_body(glm::dvec3(382.0, 0.0, 0.0), glm::dvec3(0.0, 0.0, 1.0), 1.0, 0.0164, glm::vec3(0.02f, 0.05f, 1.0f), 1219.0, 0.5, sun);
-    CelestialBody* moon = create_celestial_body(glm::dvec3(383.0, 0.0, 0.0), glm::dvec3(0.0, 0.0, 1.0), 0.0123, 0.0164 / 3.5, glm::vec3(0.8f, 0.8f, 0.8f), 1219.0, 30.0, earth);
-    // we found the lagrange2 distance by trial and error, at 3.6952758789 it goes away from the sun and at 3.69527282714 it goes towards the sun
-    CelestialBody* lagrange2 = create_celestial_body(glm::dvec3(382.0 + 3.69527525007, 0.0, 0.0), glm::dvec3(0.0, 0.0, 1.0), 0.00001, 0.0164 / 3.5, glm::vec3(0.8f, 0.8f, 0.8f), 1219.0, 30.0, earth);
-    CelestialBody* lagrange4 = create_celestial_body(glm::rotate(glm::vec3(earth->position), glm::radians(60.0f), glm::vec3(0.0, 1.0, 0.0)), glm::dvec3(0.0, 0.0, 1.0), 0.00001, 0.0164 / 3.5, glm::vec3(0.8f, 0.3f, 0.1f), 1219.0, 0.5, sun);
-    double orbital_velocity_mag = std::sqrt((gravitational_constant * sun->mass) / (glm::length(sun->position - earth->position)));
+    CelestialBody *sun = create_celestial_body(glm::dvec3(0.0), glm::dvec3(0.0), 333000.0, 0.0164 * 100, glm::vec3(0.97f, 0.45f, 0.1f), SUN_SIZE_SCALE, SUN_DIST_SCALE, NULL);
+    // TODO: figure out why the game breaks if I put the same distance for two planets (i.e. 382.0)
+    CelestialBody* mercury = create_celestial_body(glm::dvec3(382.0 * 0.4164, 0.0, 0.0), glm::dvec3(0.0, 0.0, 1.0), 0.055, 0.0164 * 0.3829, glm::vec3(0.8f, 0.4f, 0.35f), ROCKY_SIZE_SCALE, ROCKY_DIST_SCALE, sun);
+    CelestialBody *venus = create_celestial_body(glm::dvec3(279.48, 0.0, 0.0), glm::dvec3(0.0, 0.0, 1.0), 0.81494, 0.0164 * 0.9499, glm::vec3(0.8f, 0.8f, 0.6f), ROCKY_SIZE_SCALE, ROCKY_DIST_SCALE, sun);
+    CelestialBody *earth = create_celestial_body(glm::dvec3(382.0, 0.0, 0.0), glm::dvec3(0.0, 0.0, 1.0), 1.0, 0.0164, glm::vec3(0.02f, 0.05f, 1.0f), ROCKY_SIZE_SCALE, ROCKY_DIST_SCALE, sun);
+    CelestialBody *moon = create_celestial_body(glm::dvec3(383.0, 0.0, 0.0), glm::dvec3(0.0, 0.0, 1.0), 0.0123, 0.0164 / 3.5, glm::vec3(0.8f, 0.8f, 0.8f), ROCKY_SIZE_SCALE, MOON_DIST_SCALE, earth);
+    CelestialBody* mars = create_celestial_body(glm::dvec3(581.4, 0.0, 0.0), glm::dvec3(0.0, 0.0, 1.0), 0.107, 0.0164 * 0.532, glm::vec3(0.95f, 0.25f, 0.2f), ROCKY_SIZE_SCALE, ROCKY_DIST_SCALE, sun);
+    CelestialBody* jupiter = create_celestial_body(glm::dvec3(1938.65, 0.0, 0.0), glm::dvec3(0.0, 0.0, 1.0), 317.81, 0.0164 * 10.97, glm::vec3(0.75f, 0.85f, 0.5f), GASSY_SIZE_SCALE, GASSY_DIST_SCALE, sun);
+    CelestialBody* saturn = create_celestial_body(glm::dvec3(382.0 * 10.07, 0.0, 0.0), glm::dvec3(0.0, 0.0, 1.0), 95.159, 0.0164 * 9.1402, glm::vec3(0.75f, 0.85f, 0.5f), GASSY_SIZE_SCALE, GASSY_DIST_SCALE * 0.7, sun);
+    // we found the lagrange2 distance (3.69537571433) by trial and error, at 3.69537883714 it goes away from the sun and at 3.69527883714 it goes towards the sun
+    CelestialBody* lagrange2 = create_celestial_body(glm::dvec3(382.0 + 3.69537571438, 0.0, 0.0), glm::dvec3(0.0, 0.0, 1.0), 0.00001, 0.0164 / 3.5, glm::vec3(0.0f, 1.0f, 0.0f), ROCKY_SIZE_SCALE, MOON_DIST_SCALE * 0.5, earth);
+    CelestialBody* lagrange4 = create_celestial_body(glm::rotate(glm::vec3(earth->position), glm::radians(60.0f), glm::vec3(0.0, 1.0, 0.0)), glm::dvec3(0.0, 0.0, 1.0), 0.00001, 0.0164 / 3.5, glm::vec3(0.0f, 1.0f, 0.0f), ROCKY_SIZE_SCALE, ROCKY_DIST_SCALE, sun);
+    double orbital_velocity_mag = std::sqrt((gravitational_constant * sun->mass) / (glm::length(sun->position - mercury->position)));
+    mercury->velocity *= orbital_velocity_mag * (3.2/3.0);
+    orbital_velocity_mag = std::sqrt((gravitational_constant * sun->mass) / (glm::length(sun->position - venus->position)));
+    venus->velocity *= orbital_velocity_mag;
+    orbital_velocity_mag = std::sqrt((gravitational_constant * sun->mass) / (glm::length(sun->position - earth->position)));
     earth->velocity *= orbital_velocity_mag;
     // Why does this work? Sounds like a such a coincidence.
     orbital_velocity_mag = std::sqrt((gravitational_constant * earth->mass) / (glm::length(earth->position - moon->position)));
     orbital_velocity_mag += std::sqrt((gravitational_constant * sun->mass) / (glm::length(sun->position - moon->position)));
     moon->velocity *= orbital_velocity_mag;
+    orbital_velocity_mag = std::sqrt((gravitational_constant * sun->mass) / (glm::length(sun->position - mars->position)));
+    mars->velocity *= orbital_velocity_mag * (3.1 / 3.0);
+    orbital_velocity_mag = std::sqrt((gravitational_constant * sun->mass) / (glm::length(sun->position - jupiter->position)));
+    jupiter->velocity *= orbital_velocity_mag;
+    orbital_velocity_mag = std::sqrt((gravitational_constant * sun->mass) / (glm::length(sun->position - saturn->position)));
+    saturn->velocity *= orbital_velocity_mag;
     orbital_velocity_mag = std::sqrt((gravitational_constant * earth->mass) / (glm::length(earth->position - lagrange2->position)));
     orbital_velocity_mag += std::sqrt((gravitational_constant * sun->mass) / (glm::length(sun->position - lagrange2->position)));
     lagrange2->velocity *= orbital_velocity_mag;
@@ -506,25 +556,37 @@ int main()
     GlobalState global_state = { };
     global_state.rendering_mode = RENDER_MINIFIED;
     global_state.celestial_bodies[global_state.num_celestial_bodies++] = sun;
+    global_state.celestial_bodies[global_state.num_celestial_bodies++] = mercury;
+    global_state.celestial_bodies[global_state.num_celestial_bodies++] = venus;
     global_state.celestial_bodies[global_state.num_celestial_bodies++] = earth;
     global_state.celestial_bodies[global_state.num_celestial_bodies++] = moon;
+    global_state.celestial_bodies[global_state.num_celestial_bodies++] = mars;
+    global_state.celestial_bodies[global_state.num_celestial_bodies++] = jupiter;
+    global_state.celestial_bodies[global_state.num_celestial_bodies++] = saturn;
     global_state.celestial_bodies[global_state.num_celestial_bodies++] = lagrange2;
     global_state.celestial_bodies[global_state.num_celestial_bodies++] = lagrange4;
     global_state.camera_target = -1;
     global_state.focused_camera_distance = FOCUSED_CAMERA_DIST;
     global_state.zoom_level = 10;
+    global_state.enable_orbit_rendering = false;
     glfwSetWindowUserPointer(window, (void*) &global_state);
 
     // initialize GL buffers
-    GLuint VAO, VBO;
+    GLuint VAO, VBO, nVBO;
     glGenVertexArrays(1, &VAO);
     glGenBuffers(1, &VBO);
+    glGenBuffers(1, &nVBO);
 
     glBindVertexArray(VAO);
-    glEnableVertexAttribArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferData(GL_ARRAY_BUFFER, sphere.num_elements * sizeof(GLfloat), sphere.data, GL_STATIC_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), (void*)0);
+        glEnableVertexAttribArray(0);
+        glBindBuffer(GL_ARRAY_BUFFER, VBO);
+        glBufferData(GL_ARRAY_BUFFER, sphere->num_elements * sizeof(GLfloat), sphere->data, GL_STATIC_DRAW);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), (void*)0);
+
+        glEnableVertexAttribArray(1);
+        glBindBuffer(GL_ARRAY_BUFFER, nVBO);
+        glBufferData(GL_ARRAY_BUFFER, sphere->num_elements * sizeof(GLfloat), sphere->normals, GL_STATIC_DRAW);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), (void*)0);
     glBindVertexArray(0);
 
     GLuint pathVAO, pathVBO;
@@ -589,7 +651,7 @@ int main()
 
                     double distance_i_j = glm::length(c_i->position - c_j->position);
                     // the epsilon is used to avoid the gravity going to infinity when distance goes too close to zero
-                    // TODO: choose a good epsilon
+                    // TODO: this doesn't seem to help much, maybe we have to choose a bigger epsilon, but we don't want to break the simulation
                     double epsilon = 0.000001;
                     double gravity_force = ((double)gravitational_constant * c_i->mass * c_j->mass) / ((distance_i_j * distance_i_j) + epsilon);
                     c_i->velocity += (glm::normalize(c_j->position - c_i->position) * gravity_force * (1.0f / (double)c_i->mass)) * delta_time;
@@ -640,7 +702,7 @@ int main()
 
         // rendering
         for (int i = 0; i < global_state.num_celestial_bodies; i++) {
-            render_celestial_body(global_state, VAO, pathVAO, pathVBO, program, sphere, global_state.celestial_bodies[i]);
+            render_celestial_body(&global_state, VAO, pathVAO, pathVBO, program, sphere, global_state.celestial_bodies[i]);
         }
 
         // finished rendering the frame
