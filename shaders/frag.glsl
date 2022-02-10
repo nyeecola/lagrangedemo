@@ -6,8 +6,8 @@ uniform vec3 lightColor;
 
 uniform bool light_emitter;
 
-in vec3 normal;
-in vec3 fragPos;
+smooth in vec3 normal;
+smooth in vec3 fragPos;
 
 void main() {
     vec3 objColor = forced_color;
